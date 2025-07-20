@@ -1,0 +1,21 @@
+- Strategy
+
+At 3:25 pm, check spot movement from 9:15 to 3:25
+Sell ATM PE if the market has gone up and vice versa
+Hedge using the strike 2% of spot away from entry strike
+
+Next morning, trail both legs independently using the 3 minute high of their respective option charts
+Exit at 9:45 if trade is still open
+
+Assume 0.5% slippage for entry and exit.
+
+- Output format (refer to attached excel)
+
+Sheet 1 - input parameters (various timings, timeframes, strike selection rules etc)
+Sheet 2 - date wise pnl and drawdown, month/year/day wise pnl
+Sheet 3 - list of all trades (entry and exit timings, prices, pnl, strike, expiry, symbol, reason of entry and exit etc)
+
+- Data
+
+Two months of spot and option data is attached.
+Use it to write code which can be run on the extended database.
