@@ -35,7 +35,10 @@ This strategy implements a market-neutral options spread with the following key 
 │   ├── OPT_sample.db      # Sample options data for testing
 │   ├── SPOT.db            # Spot price database
 │   └── SPOT_sample.db     # Sample spot data for testing
-└── strategy_backtest_full.xlsx  # Complete backtest results
+├── strategy_backtest_full.xlsx  # Complete backtest results
+├── strategy_dashboard.png       # Performance visualization charts
+├── check_data_quality.py        # Data quality analysis script
+└── DATA_QUALITY_ISSUES.md      # Comprehensive data quality report
 ```
 
 ## Key Features
@@ -77,6 +80,12 @@ python chart_analysis.py
 
 # Validate P&L logic (optional)
 python pnl_summary.py
+
+# Check data quality issues
+python check_data_quality.py
+
+# Debug specific failed trades
+python debug_failed_trades.py
 ```
 
 ### Configuration
@@ -98,6 +107,21 @@ Modify `config.py` to adjust strategy parameters:
 - Strategy shows consistent profitability with reasonable win rate
 - Hedge positions provide downside protection as intended
 - Time decay effects captured through overnight position management
+
+## ⚠️ Data Quality Issues Discovered
+
+**Critical Finding**: Significant data quality issues were identified that impact strategy execution:
+
+- **Trade Failure Rate**: ~40% of potential trades fail due to missing morning session data
+- **Missing Data Window**: 9:15-9:45 AM exit data frequently unavailable for specific option strikes
+- **Strike-Specific Gaps**: Different option strikes have vastly different data completeness levels
+
+**Impact on Results**:
+- Current backtest results are based on trades with complete data only
+- Many potential trading opportunities are excluded due to data gaps
+- Strategy performance may be different with complete data coverage
+
+**See [DATA_QUALITY_ISSUES.md](DATA_QUALITY_ISSUES.md) for comprehensive analysis**
 
 ## Technical Implementation
 
@@ -152,6 +176,12 @@ The strategy has been thoroughly validated for business logic correctness:
   - PE vs CE performance comparison
   - Position component analysis
   - Win/loss statistics
+
+- `DATA_QUALITY_ISSUES.md`: Comprehensive data quality analysis
+  - Missing morning session data patterns
+  - Strike-specific coverage gaps
+  - Failed trade case studies
+  - Recommendations for data improvement
 
 ## License
 
