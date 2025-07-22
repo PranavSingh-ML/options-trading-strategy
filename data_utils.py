@@ -53,9 +53,27 @@ class DataManager:
         df = pd.read_sql_query(query, conn)
         
         # Use nearest expiry to avoid multiple contracts for same strike
+        # Skip expiries that expire the next day to avoid meaningless hedge
         if len(df) > 0 and strike and instrument_type:
-            nearest_expiry = df['expiry'].min()
+            # Convert expiry strings to datetime for proper date comparison
+            df['expiry_date'] = pd.to_datetime(df['expiry'], format='%d-%m-%Y')
+            trade_date = pd.to_datetime(date_table, format='%d%m%Y')
+            next_day = trade_date + pd.Timedelta(days=1)
+            
+            # Filter out expiries that expire the next day
+            valid_expiries = df[df['expiry_date'] > next_day]
+            
+            if len(valid_expiries) > 0:
+                # Use earliest valid expiry (not expiring next day)
+                nearest_expiry_date = valid_expiries['expiry_date'].min()
+                nearest_expiry = valid_expiries[valid_expiries['expiry_date'] == nearest_expiry_date]['expiry'].iloc[0]
+            else:
+                # Fallback to nearest expiry if no valid expiries found
+                nearest_expiry_date = df['expiry_date'].min()
+                nearest_expiry = df[df['expiry_date'] == nearest_expiry_date]['expiry'].iloc[0]
+            
             df = df[df['expiry'] == nearest_expiry]
+            df = df.drop('expiry_date', axis=1)  # Clean up temporary column
         
         conn.close()
         return df
