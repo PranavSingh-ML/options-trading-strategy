@@ -10,7 +10,8 @@ class Trade:
     date: str
     exit_date: str
     entry_time: str
-    exit_time: str
+    main_exit_time: str
+    hedge_exit_time: str
     strike: int
     hedge_strike: int
     instrument_type: str
@@ -25,7 +26,8 @@ class Trade:
     hedge_pnl_pct: float
     total_pnl_pct: float
     entry_reason: str
-    exit_reason: str
+    main_exit_reason: str
+    hedge_exit_reason: str
 
 class OptionsStrategy:
     def __init__(self, config: StrategyConfig, data_manager: DataManager):
@@ -82,68 +84,51 @@ class OptionsStrategy:
             return price * (1 + slippage)  # Buying: pay higher price due to slippage
     
     def calculate_trailing_exits(self, option_df: pd.DataFrame, entry_price: float, is_short_position: bool = True) -> Tuple[Optional[str], Optional[float], str]:
-        """Calculate trailing stop exits using 3-minute rolling highs for both main and hedge positions"""
+        """Calculate trailing stop exits with 3% buffer from 3-minute highs/lows"""
         if len(option_df) == 0:
             return None, None, "No Data"
         
         option_df = option_df.copy()
+        buffer_pct = 0.05  # 3% buffer
         
-        # Calculate 3-minute rolling maximum of high prices as trailing stop
-        option_df['3min_trail'] = option_df['high'].rolling(window=3, min_periods=1).max()
-        
-        # Check each minute for trailing stop hit
-        for idx, row in option_df.iterrows():
-            trailing_stop = row['3min_trail']
-            if row['close'] >= trailing_stop:
-                return row['time'], row['close'], "Trail Stop Hit"
+        if is_short_position:
+            # For SHORT positions: Trail 3-minute lows, exit when price goes up beyond low + 3%
+            option_df['3min_trail'] = option_df['low'].rolling(window=3, min_periods=1).min()
+            option_df['trail_stop_level'] = option_df['3min_trail'] * (1 + buffer_pct)
+            
+            # Exit when close price goes above (3-min low + 3% buffer), but only after 3 minutes
+            for i, (idx, row) in enumerate(option_df.iterrows()):
+                if i >= 2 and row['close'] > row['trail_stop_level']:  # i >= 2 means 3rd minute (0,1,2)
+                    return row['time'], row['close'], "Trail Stop Hit"
+        else:
+            # For LONG positions: Trail 3-minute highs, exit when price goes down beyond high - 3%  
+            option_df['3min_trail'] = option_df['high'].rolling(window=3, min_periods=1).max()
+            option_df['trail_stop_level'] = option_df['3min_trail'] * (1 - buffer_pct)
+            
+            # Exit when close price goes below (3-min high - 3% buffer), but only after 3 minutes
+            for i, (idx, row) in enumerate(option_df.iterrows()):
+                if i >= 2 and row['close'] < row['trail_stop_level']:  # i >= 2 means 3rd minute (0,1,2)
+                    return row['time'], row['close'], "Trail Stop Hit"
         
         # Exit at 9:45 AM if no trailing stop was hit during the session
         last_row = option_df.iloc[-1]
         return last_row['time'], last_row['close'], "Time Exit"
     
-    def calculate_simultaneous_exits(self, main_df: pd.DataFrame, hedge_df: pd.DataFrame, 
-                                   main_entry_price: float, hedge_entry_price: float) -> Tuple[Optional[str], Optional[float], Optional[float], str]:
-        """Manage spread position exits: when either leg hits trailing stop, close both legs simultaneously"""
-        if len(main_df) == 0 or len(hedge_df) == 0:
-            return None, None, None, "No Data"
+    def calculate_independent_exits(self, main_df: pd.DataFrame, hedge_df: pd.DataFrame, 
+                                  main_entry_price: float, hedge_entry_price: float) -> Tuple[Optional[str], Optional[float], str, Optional[str], Optional[float], str]:
+        """Calculate independent trailing exits for main and hedge positions"""
         
-        # Prepare trailing stop calculations for both legs
-        main_df = main_df.copy()
-        hedge_df = hedge_df.copy()
+        # Calculate main position exit (SHORT position - we sold the option)
+        main_exit_time, main_exit_price, main_exit_reason = self.calculate_trailing_exits(
+            main_df, main_entry_price, is_short_position=True
+        )
         
-        main_df['3min_trail'] = main_df['high'].rolling(window=3, min_periods=1).max()
-        hedge_df['3min_trail'] = hedge_df['high'].rolling(window=3, min_periods=1).max()
+        # Calculate hedge position exit (LONG position - we bought the option)  
+        hedge_exit_time, hedge_exit_price, hedge_exit_reason = self.calculate_trailing_exits(
+            hedge_df, hedge_entry_price, is_short_position=False
+        )
         
-        # Process all available timestamps chronologically
-        all_times = sorted(set(main_df['time'].tolist() + hedge_df['time'].tolist()))
-        
-        # Monitor both legs each minute for trailing stop hits
-        for current_time in all_times:
-            main_current = main_df[main_df['time'] == current_time]
-            hedge_current = hedge_df[hedge_df['time'] == current_time]
-            
-            # Require data for both legs to proceed
-            if len(main_current) == 0 or len(hedge_current) == 0:
-                continue
-                
-            main_row = main_current.iloc[0]
-            hedge_row = hedge_current.iloc[0]
-            
-            # Check trailing stop conditions for both legs
-            main_stop_hit = main_row['close'] >= main_row['3min_trail']
-            hedge_stop_hit = hedge_row['close'] >= hedge_row['3min_trail']
-            
-            # Exit entire spread position when either leg hits its stop
-            if main_stop_hit or hedge_stop_hit:
-                reason = "Main Trail Stop" if main_stop_hit else "Hedge Trail Stop"
-                return current_time, main_row['close'], hedge_row['close'], reason
-        
-        # Force exit at 9:45 AM if no trailing stops were triggered
-        main_last = main_df.iloc[-1]
-        hedge_last = hedge_df.iloc[-1]
-        final_time = max(main_last['time'], hedge_last['time'])
-        
-        return final_time, main_last['close'], hedge_last['close'], "Time Exit"
+        return main_exit_time, main_exit_price, main_exit_reason, hedge_exit_time, hedge_exit_price, hedge_exit_reason
     
     def execute_trade(self, date: str) -> Optional[Trade]:
         """Execute complete options spread trade: analyze market, enter positions, and manage exits"""
@@ -151,6 +136,7 @@ class OptionsStrategy:
             # Load spot market data for trade entry analysis
             spot_df = self.data_manager.get_spot_data(date)
             if len(spot_df) == 0:
+                print(f"    DEBUG: No spot data for {date}")
                 return None
             
             # Determine market direction based on intraday movement
@@ -159,6 +145,7 @@ class OptionsStrategy:
             # Load available option contracts and strikes for the trading day
             option_sample = self.data_manager.get_option_data(date)
             if len(option_sample) == 0:
+                print(f"    DEBUG: No option data for {date}")
                 return None
                 
             expiry = option_sample['expiry'].iloc[0]
@@ -172,14 +159,24 @@ class OptionsStrategy:
             main_option_df = self.data_manager.get_option_data(date, atm_strike, instrument_type)
             hedge_option_df = self.data_manager.get_option_data(date, hedge_strike, instrument_type)
             
-            if len(main_option_df) == 0 or len(hedge_option_df) == 0:
+            if len(main_option_df) == 0:
+                print(f"    DEBUG: No main option data for {date} {instrument_type} {atm_strike}")
+                return None
+            if len(hedge_option_df) == 0:
+                print(f"    DEBUG: No hedge option data for {date} {instrument_type} {hedge_strike}")
                 return None
             
             # Get entry prices at 3:25 PM
             entry_row = main_option_df[main_option_df['time'] <= self.config.entry_time]
             hedge_entry_row = hedge_option_df[hedge_option_df['time'] <= self.config.entry_time]
             
-            if len(entry_row) == 0 or len(hedge_entry_row) == 0:
+            if len(entry_row) == 0:
+                print(f"    DEBUG: No main option entry data at/before {self.config.entry_time} for {date}")
+                print(f"    DEBUG: Available times: {main_option_df['time'].min()} to {main_option_df['time'].max()}")
+                return None
+            if len(hedge_entry_row) == 0:
+                print(f"    DEBUG: No hedge option entry data at/before {self.config.entry_time} for {date}")
+                print(f"    DEBUG: Available times: {hedge_option_df['time'].min()} to {hedge_option_df['time'].max()}")
                 return None
                 
             entry_row = entry_row.iloc[-1:] 
@@ -193,24 +190,34 @@ class OptionsStrategy:
             # Move to next trading day for position management
             next_date = self.data_manager.get_next_trading_day(date)
             if next_date is None:
+                print(f"    DEBUG: No next trading day after {date}")
                 return None
             
             # Load next day option data for exit management
             next_main_df = self.data_manager.get_option_data(next_date, atm_strike, instrument_type)
             next_hedge_df = self.data_manager.get_option_data(next_date, hedge_strike, instrument_type)
             
-            if len(next_main_df) == 0 or len(next_hedge_df) == 0:
+            if len(next_main_df) == 0:
+                print(f"    DEBUG: No next day main option data for {next_date} {instrument_type} {atm_strike}")
+                return None
+            if len(next_hedge_df) == 0:
+                print(f"    DEBUG: No next day hedge option data for {next_date} {instrument_type} {hedge_strike}")
                 return None
             
             # Limit data to trading window (9:15 AM to 9:45 AM)
+            
             next_main_df = next_main_df[next_main_df['time'] <= self.config.exit_time]
             next_hedge_df = next_hedge_df[next_hedge_df['time'] <= self.config.exit_time]
             
-            if len(next_main_df) == 0 or len(next_hedge_df) == 0:
+            if len(next_main_df) == 0:
+                print(f"    DEBUG: No main option data at/before {self.config.exit_time} on {next_date}")
+                return None
+            if len(next_hedge_df) == 0:
+                print(f"    DEBUG: No hedge option data at/before {self.config.exit_time} on {next_date}")
                 return None
             
-            # Execute spread exit strategy with simultaneous leg management
-            exit_time, main_exit_price_raw, hedge_exit_price_raw, exit_reason = self.calculate_simultaneous_exits(
+            # Execute independent exit strategy for each leg
+            main_exit_time, main_exit_price_raw, main_exit_reason, hedge_exit_time, hedge_exit_price_raw, hedge_exit_reason = self.calculate_independent_exits(
                 next_main_df, next_hedge_df, entry_price, hedge_entry_price
             )
             
@@ -238,7 +245,8 @@ class OptionsStrategy:
                 date=date,
                 exit_date=next_date,
                 entry_time=entry_time,
-                exit_time=exit_time,
+                main_exit_time=main_exit_time,
+                hedge_exit_time=hedge_exit_time,
                 strike=atm_strike,
                 hedge_strike=hedge_strike,
                 instrument_type=instrument_type,
@@ -253,7 +261,8 @@ class OptionsStrategy:
                 hedge_pnl_pct=hedge_pnl_pct,
                 total_pnl_pct=total_pnl_pct,
                 entry_reason=f"Market {direction}, Sell {instrument_type}",
-                exit_reason=exit_reason
+                main_exit_reason=main_exit_reason,
+                hedge_exit_reason=hedge_exit_reason
             )
             
         except Exception as e:
